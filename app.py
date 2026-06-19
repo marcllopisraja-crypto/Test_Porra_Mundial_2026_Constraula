@@ -6,9 +6,7 @@ import os
 import json
 import unicodedata
 import hashlib
-import math
 import time
-import requests  # Nova importació per connectar amb l'API
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -25,14 +23,6 @@ SNAPSHOT_CURRENT_FILE = "ranking_snapshot_current.csv"
 SNAPSHOT_DISPLAY_FILE = "ranking_snapshot_display.csv"
 SNAPSHOT_META_FILE = "ranking_snapshot_meta.json"
 HISTORY_FILE = "ranking_history.csv"
-
-# ==================================================
-# CONFIGURACIÓ DE L'API (API-FOOTBALL)
-# ==================================================
-# Registra't a rapidapi.com, cerca "API-Football" i posa la teva clau aquí:
-RAPIDAPI_KEY = "LA_TEVA_CLAU_DE_RAPIDAPI_AQUÍ"
-LEAGUE_ID = 1  # ID del Mundial a API-Football (sol ser l'1, confirma-ho al seu cercador)
-SEASON = 2026  # Any del Mundial
 
 # ==================================================
 # NORMALITZACIÓ I BANDERES
@@ -58,7 +48,7 @@ TEAM_NAME_MAP_RAW = {
     "turkiye": "Turquia", "turkey": "Turquia", "turquia": "Turquia",
     "germany": "Alemanya", "alemanya": "Alemanya", "curacao": "Curaçao", "curaçao": "Curaçao",
     "cote d'ivoire": "Costa d'Ivori", "côte d'ivoire": "Costa d'Ivori", "costa d'ivori": "Costa d'Ivori",
-    "ecuador": "Equador", "equador": "Equador", "netherlands": "Països Baixos", "paisos baixos": "Països Baixos", "països baixos": "Països Baixos",
+    "ecuador": "Equador", "equador": "Equador", "netherlands": "Països Baixos", "paisos baixos": "Països Baixos", "països baixos": "Països Baixos", "pasïsos baixos": "Països Baixos",
     "japan": "Japó", "japo": "Japó", "japó": "Japó", "sweden": "Suècia", "suecia": "Suècia", "suècia": "Suècia", "tunisia": "Tunísia", "tunísia": "Tunísia",
     "belgium": "Bèlgica", "belgica": "Bèlgica", "bèlgica": "Bèlgica", "egypt": "Egipte", "egipte": "Egipte",
     "ir iran": "Iran", "iran": "Iran", "new zealand": "Nova Zelanda", "nova zelanda": "Nova Zelanda",
@@ -189,31 +179,13 @@ def trobar_col_resultat_final_porra(df_porra):
     return None
 
 # ==================================================
-# CONNEXIONS I PETICIONS API
-# ==================================================
-@st.cache_data(ttl=900, show_spinner=False)  # Guarda les dades 15 minuts per no exhaurir la quota diària de l'API
-def consultar_api_football(endpoint, params=None):
-    url = f"https://api-football-v1.p.rapidapi.com/v3/{endpoint}"
-    headers = {
-        "X-RapidAPI-Key": RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"
-    }
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        if response.status_code == 200:
-            return response.json().get("response", [])
-    except Exception as e:
-        st.sidebar.warning(f"⚠️ Error de connexió amb l'API: {e}")
-    return None
-
-# ==================================================
-# OBTENCIÓ DE RESULTATS (API + FALLBACK EXCEL)
+# RESULTATS DES D'EXCEL, SENSE API
 # ==================================================
 def construir_resultats_des_excel(df_resultats):
     df = preparar_taula_buida(df_resultats)
     resultats = {
         "source": "Excel", "group_positions": {}, "Setzens": [], "Vuitens": [], "Quarts": [], "Semis": [],
-        "Finalistes": [], "Campió": [], "MVP": [], "Pichichi": [], "Gols Pichichi": None
+        "Finalistes": [], "Campió": [], "MVP": [], "Pichichi": [], "Gols Pichichi": None, "api_error": ""
     }
     col_grup = trobar_columna_flexible(df, "Grup")
     col_pos = trobar_columna_flexible(df, "Posició")
@@ -247,85 +219,6 @@ def construir_resultats_des_excel(df_resultats):
             resultats["Gols Pichichi"] = int(taula.iloc[0][col_gols])
     return resultats
 
-def construir_resultats(df_resultats):
-    resultats = {
-        "source": "API-Football", "group_positions": {}, "Setzens": [], "Vuitens": [], "Quarts": [], "Semis": [],
-        "Finalistes": [], "Campió": [], "MVP": [], "Pichichi": [], "Gols Pichichi": None
-    }
-    
-    # Intentem descarregar les diferents branques de l'API
-    api_standings = consultar_api_football("standings", {"league": LEAGUE_ID, "season": SEASON})
-    api_fixtures = consultar_api_football("fixtures", {"league": LEAGUE_ID, "season": SEASON})
-    api_topscorers = consultar_api_football("players/topscorers", {"league": LEAGUE_ID, "season": SEASON})
-    
-    # Sistema de Seguretat Fallback: Si l'API no té dades o falla, carreguem l'Excel clàssic
-    if not api_standings or not api_fixtures:
-        st.sidebar.info("🔄 API no configurada o fora de línia. Fent servir l'Excel manual.")
-        return construir_resultats_des_excel(df_resultats)
-        
-    # --- PROCESSAR GRUPS DES DE L'API ---
-    for league_data in api_standings:
-        for group_list in league_data.get("league", {}).get("standings", []):
-            for i, team_data in enumerate(group_list):
-                raw_group_name = team_data.get("group", "")
-                grup_lletra = raw_group_name.replace("Group ", "").strip()
-                
-                equip_raw = team_data.get("team", {}).get("name", "")
-                equip_net = TEAM_NAME_MAP.get(normalitzar_text(equip_raw), equip_raw)
-                
-                resultats["group_positions"].setdefault(grup_lletra, {})
-                if i == 0: resultats["group_positions"][grup_lletra]["1r"] = equip_net
-                elif i == 1: resultats["group_positions"][grup_lletra]["2n"] = equip_net
-                elif i == 2: resultats["group_positions"][grup_lletra]["3r"] = equip_net
-
-    # --- PROCESSAR ELIMINATÒRIES DES DE L'API ---
-    for match in api_fixtures:
-        round_name = match.get("league", {}).get("round", "")
-        teams = match.get("teams", {})
-        
-        home_team = teams.get("home", {}).get("name")
-        away_team = teams.get("away", {}).get("name")
-        if not home_team or not away_team: continue
-        
-        home_net = TEAM_NAME_MAP.get(normalitzar_text(home_team), home_team)
-        away_net = TEAM_NAME_MAP.get(normalitzar_text(away_team), away_team)
-        
-        if "Round of 32" in round_name:
-            if home_net not in resultats["Setzens"]: resultats["Setzens"].append(home_net)
-            if away_net not in resultats["Setzens"]: resultats["Setzens"].append(away_net)
-        elif "Round of 16" in round_name:
-            if home_net not in resultats["Vuitens"]: resultats["Vuitens"].append(home_net)
-            if away_net not in resultats["Vuitens"]: resultats["Vuitens"].append(away_net)
-        elif "Quarter-finals" in round_name:
-            if home_net not in resultats["Quarts"]: resultats["Quarts"].append(home_net)
-            if away_net not in resultats["Quarts"]: resultats["Quarts"].append(away_net)
-        elif "Semi-finals" in round_name:
-            if home_net not in resultats["Semis"]: resultats["Semis"].append(home_net)
-            if away_net not in resultats["Semis"]: resultats["Semis"].append(away_net)
-        elif "Final" in round_name and "Third" not in round_name:
-            if home_net not in resultats["Finalistes"]: resultats["Finalistes"].append(home_net)
-            if away_net not in resultats["Finalistes"]: resultats["Finalistes"].append(away_net)
-            
-            # Verificar guanyador si el partit ha finalitzat
-            status = match.get("fixture", {}).get("status", {}).get("short", "")
-            if status in ["FT", "AET", "PEN"]:
-                winner = teams.get("home" if teams.get("home", {}).get("winner") else "away", {}).get("name")
-                if winner:
-                    resultats["Campió"] = [TEAM_NAME_MAP.get(normalitzar_text(winner), winner)]
-
-    # --- PROCESSAR PICHICHI DES DE L'API ---
-    if api_topscorers:
-        top_player = api_topscorers[0]
-        player_name = top_player.get("player", {}).get("name", "Pendent")
-        goals = top_player.get("statistics", [{}])[0].get("goals", {}).get("total", 0)
-        if goals > 0:
-            resultats["Pichichi"] = [player_name]
-            resultats["Gols Pichichi"] = int(goals)
-
-    # L'MVP el continuem heretant de l'excel de suport o gestió ja que cap API el publica de manera automatitzada fins al final
-    resultats["MVP"] = llista_valors_no_buits(df_resultats, "MVP")
-    return resultats
-
 # ==================================================
 # RÀNQUINGS / MOVIMENTS / HISTÒRIC
 # ==================================================
@@ -334,10 +227,6 @@ def recalcular_posicions(df):
     df["Posició"] = df.index + 1
     df["Punts"] = pd.to_numeric(df["Punts"], errors="coerce").fillna(0).round(1)
     df["Dif líder"] = (df["Punts"] - float(df["Punts"].iloc[0])).round(1) if not df.empty else 0.0
-    if not df.empty and float(df["Punts"].max()) > 0:
-        df["% líder"] = (df["Punts"] / float(df["Punts"].max()) * 100).round(1)
-    else:
-        df["% líder"] = 0.0
     return df
 
 def crear_ranking_des_de_porra(df_porra):
@@ -380,9 +269,123 @@ def crear_ranking_departaments(df_ranking):
     resum["Dif líder"] = (resum["Mitjana_punts"] - float(resum["Mitjana_punts"].iloc[0])).round(1) if not resum.empty else 0.0
     return resum[["Posició", "Departament", "Participants", "Mitjana_punts", "Punts_totals", "Millor_puntuacio", "Líder departament", "Dif líder"]]
 
+def crear_tauler_medalles_departaments(df_ranking):
+    if "Departament" not in df_ranking.columns:
+        return pd.DataFrame()
+    df = df_ranking.copy().sort_values("Posició")
+    
+    # Comptar presències a diferents trams del rànquing
+    top5_counts = df[df["Posició"] <= 5].groupby("Departament")["Participant"].count()
+    top10_counts = df[df["Posició"] <= 10].groupby("Departament")["Participant"].count()
+    top20_counts = df[df["Posició"] <= 20].groupby("Departament")["Participant"].count()
+    
+    deps = df["Departament"].unique()
+    medalles = []
+    for d in deps:
+        t5 = int(top5_counts.get(d, 0))
+        t10 = int(top10_counts.get(d, 0))
+        t20 = int(top20_counts.get(d, 0))
+        medalles.append({
+            "Departament": d,
+            "🥇 En Top 5": t5,
+            "🥈 En Top 10": t10,
+            "🥉 En Top 20": t20,
+            "Total Pòdis": t5 + t10 + t20
+        })
+    df_medalles = pd.DataFrame(medalles)
+    df_medalles = df_medalles.sort_values(by=["🥇 En Top 5", "🥈 En Top 10", "🥉 En Top 20", "Total Pòdis"], ascending=False).reset_index(drop=True)
+    df_medalles.insert(0, "Posició Olímpica", df_medalles.index + 1)
+    return df_medalles
+
 def ranking_signature(df_ranking, resultats_actuals):
     cols = ["Participant", "Punts", "Posició"]
     if "Departament" in df_ranking.columns:
         cols.append("Departament")
     payload = df_ranking[cols].sort_values("Participant").to_json(orient="records", force_ascii=False)
-    payload += json.dumps({k: resultats_actuals.get(k) for k in ["Setzens", "Vuite
+    payload += json.dumps({
+        k: resultats_actuals.get(k) for k in ["source", "Setzens", "Vuitens", "Quarts", "Semis", "Finalistes", "Campió", "Pichichi", "Gols Pichichi"]
+    }, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+def carregar_csv_segura(path):
+    try:
+        return pd.read_csv(path) if os.path.exists(path) else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+def carregar_meta_snapshot():
+    if not os.path.exists(SNAPSHOT_META_FILE):
+        return {}
+    try:
+        with open(SNAPSHOT_META_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def guardar_meta_snapshot(snapshot_key):
+    with open(SNAPSHOT_META_FILE, "w", encoding="utf-8") as f:
+        json.dump({"snapshot_key": snapshot_key, "updated_at": datetime.now(tz=ZoneInfo("Europe/Madrid")).isoformat()}, f, ensure_ascii=False, indent=2)
+
+def guardar_snapshot_actual(df_ranking):
+    cols = ["Participant", "Punts", "Posició"] + (["Departament"] if "Departament" in df_ranking.columns else [])
+    df_ranking[cols].rename(columns={"Punts": "Punts anteriors", "Posició": "Posició anterior"}).to_csv(SNAPSHOT_CURRENT_FILE, index=False)
+
+def guardar_snapshot_display(df_ranking):
+    cols = ["Participant", "Canvi posició", "Canvi punts", "Canvi num posició", "Punts anteriors", "Posició anterior"]
+    df_ranking[[c for c in cols if c in df_ranking.columns]].to_csv(SNAPSHOT_DISPLAY_FILE, index=False)
+
+def aplicar_moviment(df_ranking, snapshot_key):
+    df = df_ranking.copy()
+    meta = carregar_meta_snapshot()
+    if meta.get("snapshot_key") == snapshot_key:
+        df_mov = carregar_csv_segura(SNAPSHOT_DISPLAY_FILE)
+        if not df_mov.empty and "Participant" in df_mov.columns:
+            df = df.merge(df_mov, on="Participant", how="left")
+            df["Canvi posició"] = df["Canvi posició"].fillna("⚪ —")
+            df["Canvi punts"] = pd.to_numeric(df["Canvi punts"], errors="coerce").fillna(0.0).round(1)
+            return df
+    prev = carregar_csv_segura(SNAPSHOT_CURRENT_FILE)
+    if prev.empty or "Participant" not in prev.columns:
+        df["Posició anterior"] = df["Posició"]
+        df["Punts anteriors"] = df["Punts"]
+        df["Canvi punts"] = 0.0
+        df["Canvi num posició"] = 0
+        df["Canvi posició"] = "⚪ —"
+    else:
+        prev["Participant"] = prev["Participant"].astype(str).str.strip()
+        df = df.merge(prev, on="Participant", how="left")
+        df["Punts anteriors"] = pd.to_numeric(df["Punts anteriors"], errors="coerce")
+        df["Posició anterior"] = pd.to_numeric(df["Posició anterior"], errors="coerce")
+        df["Canvi punts"] = (df["Punts"] - df["Punts anteriors"]).fillna(0).round(1)
+        df["Canvi num posició"] = (df["Posició anterior"] - df["Posició"]).fillna(0).astype(int)
+        df["Canvi posició"] = df["Canvi num posició"].apply(lambda x: f"🟢 ▲ +{x}" if x > 0 else (f"🔴 ▼ {x}" if x < 0 else "⚪ —"))
+    guardar_snapshot_actual(df)
+    guardar_snapshot_display(df)
+    guardar_meta_snapshot(snapshot_key)
+    return df
+
+def aplicar_moviment_departament(df_dep_actual, df_ranking_global, departament):
+    df = df_dep_actual.copy()
+    for col in ["Punts anteriors", "Posició anterior", "Punts anteriors dep", "Posició anterior dep", "Canvi punts", "Canvi num posició", "Canvi posició"]:
+        if col in df.columns:
+            df = df.drop(columns=[col])
+    if "Punts anteriors" not in df_ranking_global.columns or "Departament" not in df_ranking_global.columns:
+        df["Canvi posició"] = "⚪ —"
+        df["Canvi punts"] = 0.0
+        return df
+    prev = df_ranking_global[df_ranking_global["Departament"].astype(str).str.strip() == str(departament).strip()].copy()
+    prev["Punts anteriors"] = pd.to_numeric(prev.get("Punts anteriors"), errors="coerce")
+    prev = prev.dropna(subset=["Punts anteriors"])
+    if prev.empty:
+        df["Canvi posició"] = "⚪ —"
+        df["Canvi punts"] = 0.0
+        return df
+    prev = prev.sort_values("Punts anteriors", ascending=False).reset_index(drop=True)
+    prev["Posició anterior dep"] = prev.index + 1
+    prev = prev[["Participant", "Punts anteriors", "Posició anterior dep"]].rename(columns={"Punts anteriors": "Punts anteriors dep"})
+    df = df.merge(prev, on="Participant", how="left")
+    df["Punts anteriors dep"] = pd.to_numeric(df["Punts anteriors dep"], errors="coerce")
+    df["Posició anterior dep"] = pd.to_numeric(df["Posició anterior dep"], errors="coerce")
+    df["Canvi punts"] = (df["Punts"] - df["Punts anteriors dep"]).fillna(0).round(1)
+    df["Canvi num posició"] = (df["Posició anterior dep"] - df["Posició"]).fillna(0).astype(int)
+    df["Canvi posició"] = df["Canvi num posició"].apply(lambda x: f"🟢 ▲ +{x}" if x > 0 e
