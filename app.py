@@ -274,7 +274,6 @@ def crear_tauler_medalles_departaments(df_ranking):
         return pd.DataFrame()
     df = df_ranking.copy().sort_values("Posició")
     
-    # Comptar presències a diferents trams del rànquing
     top5_counts = df[df["Posició"] <= 5].groupby("Departament")["Participant"].count()
     top10_counts = df[df["Posició"] <= 10].groupby("Departament")["Participant"].count()
     top20_counts = df[df["Posició"] <= 20].groupby("Departament")["Participant"].count()
@@ -388,4 +387,7 @@ def aplicar_moviment_departament(df_dep_actual, df_ranking_global, departament):
     df["Posició anterior dep"] = pd.to_numeric(df["Posició anterior dep"], errors="coerce")
     df["Canvi punts"] = (df["Punts"] - df["Punts anteriors dep"]).fillna(0).round(1)
     df["Canvi num posició"] = (df["Posició anterior dep"] - df["Posició"]).fillna(0).astype(int)
-    df["Canvi posició"] = df["Canvi num posició"].apply(lambda x: f"🟢 ▲ +{x}" if x > 0 e
+    df["Canvi posició"] = df["Canvi num posició"].apply(lambda x: f"🟢 ▲ +{x}" if x > 0 else (f"🔴 ▼ {x}" if x < 0 else "⚪ —"))
+    return df
+
+de
